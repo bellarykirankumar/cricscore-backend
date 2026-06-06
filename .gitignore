@@ -1,0 +1,26 @@
+# Python dependencies bundled in Lambda zips
+*.dist-info/
+botocore/
+boto3/
+s3transfer/
+urllib3/
+dateutil/
+jmespath/
+cffi/
+cryptography/
+pycparser/
+attr/
+attrs/
+wrapt/
+bin/
+aws_encryption_sdk/
+*.so
+
+# Node dependencies
+node_modules/
+
+# Build artifacts
+*.zip
+__pycache__/
+*.pyc
+.DS_Store
