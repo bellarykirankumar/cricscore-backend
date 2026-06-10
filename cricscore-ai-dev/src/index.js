@@ -2,7 +2,7 @@
 const https = require("https");
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-const MODEL = "claude-haiku-4-5";
+const MODEL = "claude-haiku-4-5-20251001";
 
 // Strip markdown code fences that Claude sometimes wraps around JSON
 function stripCodeFences(text) {
@@ -181,6 +181,56 @@ async function handleCommentary(body) {
   return resp(200, { commentary: clean });
 }
 
+// ── POST /ai/check-feedback ───────────────────────────────────
+async function handleCheckFeedback(body) {
+  const { text } = body;
+  if (!text) return resp(400, { error: 'text required' });
+
+  const features = `
+CricScore app features:
+- Ball-by-ball live scoring with AI commentary on every delivery
+- Voice scoring (say "four" or "wicket" to score)
+- Tournaments: create leagues, knockouts, group+knockout formats
+- AI-powered fixture schedule generation
+- Team management with player rosters, roles, batting/bowling styles
+- Player country registry — search players across teams by country
+- Import players via CSV file
+- Scoring Sheet (Quick Score): lightweight over-by-over tally with ball-by-ball entry, no backend, no login needed — open from the ☰ menu
+- AI Support chat — ask anything about the app
+- Highlights/clip gallery — auto-captured video clips on wickets and boundaries
+- Scorecard, commentary, and match history screens
+- Toss management and innings setup
+- Today's fixtures view on home screen
+- Multi-format support: T10, T20, ODI, Test, Gully/custom overs
+`;
+
+  const system = `You are an assistant for the CricScore cricket scoring app. A user has typed a feedback/suggestion. Your job is to check it against the known feature list and respond with JSON only.
+
+Known features:
+${features}
+
+Respond with JSON in this exact format:
+{
+  "type": "exists" | "duplicate" | "new",
+  "message": "one or two sentence explanation",
+  "howTo": "how to access the feature if type=exists, else null"
+}
+
+- "exists": the feature is already in the app
+- "duplicate": very similar to something already requested (if you can infer from context)
+- "new": genuinely new idea not covered above
+
+Only return valid JSON. No markdown.`;
+
+  const text2 = await callClaude(system, `User suggestion: "${text}"`);
+  try {
+    const result = JSON.parse(stripCodeFences(text2));
+    return resp(200, result);
+  } catch {
+    return resp(200, { type: 'new', message: 'Could not analyse suggestion automatically.', howTo: null });
+  }
+}
+
 // ── Handler ───────────────────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
@@ -202,6 +252,9 @@ exports.handler = async (event) => {
   }
   if (path.endsWith("/ai/commentary") && event.httpMethod === "POST") {
     return handleCommentary(body);
+  }
+  if (path.endsWith("/ai/check-feedback") && event.httpMethod === "POST") {
+    return handleCheckFeedback(body);
   }
 
   return resp(404, { error: "Not found" });

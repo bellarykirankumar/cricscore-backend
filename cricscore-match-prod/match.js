@@ -30831,6 +30831,32 @@ var handler = async (event) => {
       ]);
       return ok({ delivery, innings: updatedInnings });
     }
+    // PATCH /matches/{matchId}/innings/{inningsNum}/state
+    // Persists current striker / non-striker / bowler without recording a delivery.
+    // Called by the app whenever the scorer changes these via pickers or swap-ends.
+    if (method === "PATCH" && path === "/matches/{matchId}/innings/{inningsNum}") {
+      const { matchId, inningsNum } = params;
+      const innings = await getItem(`MATCH#${matchId}`, `INNINGS#${inningsNum}`);
+      if (!innings) return err2("Innings not found", 404);
+      const updates = { updatedAt: now() };
+      if (body.currentStrikerId    !== undefined) updates.currentStrikerId    = body.currentStrikerId;
+      if (body.currentNonStrikerId !== undefined) updates.currentNonStrikerId = body.currentNonStrikerId;
+      if (body.currentBowlerId     !== undefined) updates.currentBowlerId     = body.currentBowlerId;
+      // Also persist corrected isOut flags (e.g. run-out victim fix)
+      if (body.dismissedPlayerId) {
+        const stats = innings.batsmanStats ?? {};
+        if (stats[body.dismissedPlayerId]) {
+          stats[body.dismissedPlayerId].isOut = true;
+          // Clear isOut from a previously wrongly-marked player if provided
+          if (body.clearedPlayerId && stats[body.clearedPlayerId]) {
+            stats[body.clearedPlayerId].isOut = false;
+          }
+          updates.batsmanStats = stats;
+        }
+      }
+      await updateItem(`MATCH#${matchId}`, `INNINGS#${inningsNum}`, updates);
+      return ok({ updated: true });
+    }
     if ((method === "DELETE" || method === "POST") && path === "/matches/{matchId}/innings/{inningsNum}/undo") {
       const { matchId, inningsNum } = params;
       const deliveries = await queryItems(`MATCH#${matchId}`, `DELIVERY#${inningsNum}`, { ScanIndexForward: false, Limit: 1 });
