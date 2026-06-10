@@ -30960,6 +30960,143 @@ var handler = async (event) => {
       return ok(users);
     }
 
+    // ── POST /tournaments/{tournamentId}/registrations ───────────
+    // Player registers interest in a league
+    if (method === "POST" && path === "/tournaments/{tournamentId}/registrations") {
+      const { tournamentId } = params;
+      const { userId: regUserId, userName, userEmail, preferredRole, bio } = body;
+      const uid = regUserId || userId || "unknown";
+      if (!uid || uid === "unknown") return err2("userId is required", 400);
+      // Upsert — re-registering is fine (idempotent)
+      const reg = {
+        PK: `TOURNAMENT#${tournamentId}`,
+        SK: `REGISTRATION#${uid}`,
+        id: uid,
+        tournamentId,
+        userId: uid,
+        userName: userName ?? "",
+        userEmail: userEmail ?? "",
+        preferredRole: preferredRole ?? "all_rounder",
+        bio: bio ?? "",
+        status: "available",
+        registeredAt: now(),
+        updatedAt: now(),
+      };
+      await putItem(reg);
+      return ok(reg, 201);
+    }
+
+    // ── GET /tournaments/{tournamentId}/registrations ─────────────
+    // List all registered players for a league (captain/organizer)
+    if (method === "GET" && path === "/tournaments/{tournamentId}/registrations") {
+      const { tournamentId } = params;
+      const qs = event.queryStringParameters ?? {};
+      const statusFilter = qs.status; // e.g. "available"
+      let regs = await queryItems(`TOURNAMENT#${tournamentId}`, "REGISTRATION#");
+      if (statusFilter) regs = regs.filter((r) => r.status === statusFilter);
+      return ok(regs);
+    }
+
+    // ── GET /tournaments/{tournamentId}/registrations/{userId} ────
+    // Check a specific user's registration status
+    if (method === "GET" && path === "/tournaments/{tournamentId}/registrations/{userId}") {
+      const { tournamentId, userId: regUserId } = params;
+      try {
+        const reg = await getItem(`TOURNAMENT#${tournamentId}`, `REGISTRATION#${regUserId}`);
+        return ok(reg);
+      } catch (_) {
+        return err2("Not registered", 404);
+      }
+    }
+
+    // ── POST /tournaments/{tournamentId}/teams/{teamId}/join-requests ─
+    // Player requests to join a specific team
+    if (method === "POST" && path === "/tournaments/{tournamentId}/teams/{teamId}/join-requests") {
+      const { tournamentId, teamId } = params;
+      const { requestedBy, requesterName, requesterEmail, preferredRole, teamName } = body;
+      const uid = requestedBy || userId || "unknown";
+      if (!uid || uid === "unknown") return err2("requestedBy is required", 400);
+      // Only one pending request per player per league
+      const existing = await queryItems(`TOURNAMENT#${tournamentId}`, "JOIN_REQUEST#");
+      const alreadyPending = existing.find(
+        (r) => r.requestedBy === uid && r.status === "pending"
+      );
+      if (alreadyPending) return err2("You already have a pending join request for this league", 409);
+      const requestId = newId();
+      const req = {
+        PK: `TOURNAMENT#${tournamentId}`,
+        SK: `JOIN_REQUEST#${requestId}`,
+        id: requestId,
+        tournamentId,
+        teamId,
+        teamName: teamName ?? "",
+        requestedBy: uid,
+        requesterName: requesterName ?? "",
+        requesterEmail: requesterEmail ?? "",
+        preferredRole: preferredRole ?? "all_rounder",
+        status: "pending",
+        requestedAt: now(),
+        updatedAt: now(),
+      };
+      await putItem(req);
+      return ok(req, 201);
+    }
+
+    // ── GET /tournaments/{tournamentId}/teams/{teamId}/join-requests ─
+    // Captain fetches join requests for their team
+    if (method === "GET" && path === "/tournaments/{tournamentId}/teams/{teamId}/join-requests") {
+      const { tournamentId, teamId } = params;
+      const qs = event.queryStringParameters ?? {};
+      const statusFilter = qs.status;
+      let reqs = await queryItems(`TOURNAMENT#${tournamentId}`, "JOIN_REQUEST#");
+      reqs = reqs.filter((r) => r.teamId === teamId);
+      if (statusFilter) reqs = reqs.filter((r) => r.status === statusFilter);
+      return ok(reqs);
+    }
+
+    // ── PATCH /tournaments/{tournamentId}/teams/{teamId}/join-requests/{requestId} ─
+    // Captain approves or rejects a join request
+    // On approval: creates a Player record + marks registration as on_team
+    if (method === "PATCH" && path === "/tournaments/{tournamentId}/teams/{teamId}/join-requests/{requestId}") {
+      const { tournamentId, teamId, requestId } = params;
+      const { status: newStatus } = body; // "approved" | "rejected"
+      if (!["approved", "rejected"].includes(newStatus)) return err2("status must be approved or rejected", 400);
+      // Update the join request
+      await updateItem(`TOURNAMENT#${tournamentId}`, `JOIN_REQUEST#${requestId}`, {
+        status: newStatus,
+        updatedAt: now(),
+      });
+      if (newStatus === "approved") {
+        // Fetch the request to get player details
+        const req = await getItem(`TOURNAMENT#${tournamentId}`, `JOIN_REQUEST#${requestId}`);
+        // Create a Player record
+        const playerId = newId();
+        await putItem({
+          PK: `TEAM#${teamId}`,
+          SK: `PLAYER#${playerId}`,
+          id: playerId,
+          teamId,
+          tournamentId,
+          name: req.requesterName || req.requesterEmail || "Player",
+          role: req.preferredRole || "all_rounder",
+          battingStyle: "right_hand",
+          userId: req.requestedBy,
+          userEmail: req.requesterEmail,
+          createdAt: now(),
+          updatedAt: now(),
+        });
+        // Mark registration as on_team
+        try {
+          await updateItem(`TOURNAMENT#${tournamentId}`, `REGISTRATION#${req.requestedBy}`, {
+            status: "on_team",
+            teamId,
+            updatedAt: now(),
+          });
+        } catch (_) { /* registration may not exist — that's OK */ }
+      }
+      return ok({ updated: true });
+    }
+
     return err2("Not found", 404);
   } catch (e5) {
     console.error("Tournament Lambda error:", e5);
