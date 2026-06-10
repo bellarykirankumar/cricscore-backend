@@ -30755,6 +30755,7 @@ var handler = async (event) => {
         shortName: shortName ?? name.slice(0, 3).toUpperCase(),
         homeGround,
         players: [],
+        createdBy: userId,
         createdAt: now(),
         updatedAt: now()
       };
@@ -30828,6 +30829,137 @@ var handler = async (event) => {
       );
       return ok(standings);
     }
+    // ── PATCH /tournaments/{tournamentId}/teams/{teamId} ─────────
+    // Update team fields: captainId, captainEmail, name, shortName
+    if (method === "PATCH" && path === "/tournaments/{tournamentId}/teams/{teamId}") {
+      const { tournamentId, teamId } = params;
+      const allowed = ["name", "shortName", "captainId", "captainEmail", "homeGround"];
+      const updates = Object.fromEntries(
+        Object.entries(body).filter(([k]) => allowed.includes(k))
+      );
+      if (Object.keys(updates).length === 0) return err2("No valid fields to update");
+      updates.updatedAt = now();
+      await updateItem(`TOURNAMENT#${tournamentId}`, `TEAM#${teamId}`, updates);
+      return ok({ updated: true });
+    }
+
+    // ── POST /tournaments/{tournamentId}/teams/{teamId}/captain-requests ─
+    // Any user requests to become captain of a team
+    if (method === "POST" && path === "/tournaments/{tournamentId}/teams/{teamId}/captain-requests") {
+      const { tournamentId, teamId } = params;
+      const { requesterName, requesterEmail, teamName, requestedBy } = body;
+      // Use sub from body (sent by the Flutter app from the stored JWT claims)
+      const requestorSub = requestedBy || userId || "unknown";
+      if (!requestorSub || requestorSub === "unknown") return err2("requestedBy is required", 400);
+      const requestId = newId();
+      const request = {
+        PK: `TOURNAMENT#${tournamentId}`,
+        SK: `CAPTAIN_REQUEST#${requestId}`,
+        id: requestId,
+        tournamentId,
+        teamId,
+        teamName: teamName ?? "",
+        requestedBy: requestorSub,
+        requesterName: requesterName ?? "",
+        requesterEmail: requesterEmail ?? "",
+        status: "pending",
+        requestedAt: now(),
+        updatedAt: now()
+      };
+      await putItem(request);
+      return ok(request, 201);
+    }
+
+    // ── GET /tournaments/{tournamentId}/captain-requests ─────────
+    // Organizer fetches captain requests (optionally filtered by status)
+    if (method === "GET" && path === "/tournaments/{tournamentId}/captain-requests") {
+      const { tournamentId } = params;
+      const qs = event.queryStringParameters ?? {};
+      const statusFilter = qs.status; // e.g. "pending"
+      let requests = await queryItems(`TOURNAMENT#${tournamentId}`, "CAPTAIN_REQUEST#");
+      if (statusFilter) {
+        requests = requests.filter((r) => r.status === statusFilter);
+      }
+      return ok(requests);
+    }
+
+    // ── PATCH /tournaments/{tournamentId}/captain-requests/{requestId} ─
+    // Organizer approves or rejects a request; approval sets captainId on the team
+    if (method === "PATCH" && path === "/tournaments/{tournamentId}/captain-requests/{requestId}") {
+      const { tournamentId, requestId } = params;
+      const { status } = body;
+      if (!["approved", "rejected"].includes(status)) return err2("status must be approved or rejected");
+      // Load the request
+      const requests = await queryItems(`TOURNAMENT#${tournamentId}`, "CAPTAIN_REQUEST#");
+      const req = requests.find((r) => r.id === requestId);
+      if (!req) return err2("Request not found", 404);
+      // Update request status
+      await updateItem(`TOURNAMENT#${tournamentId}`, `CAPTAIN_REQUEST#${requestId}`, {
+        status,
+        updatedAt: now()
+      });
+      // If approved, set captainId on the team
+      if (status === "approved") {
+        await updateItem(`TOURNAMENT#${tournamentId}`, `TEAM#${req.teamId}`, {
+          captainId: req.requestedBy,
+          captainEmail: req.requesterEmail,
+          updatedAt: now()
+        });
+        // Reject all other pending requests for the same team
+        const others = requests.filter(
+          (r) => r.id !== requestId && r.teamId === req.teamId && r.status === "pending"
+        );
+        for (const other of others) {
+          await updateItem(`TOURNAMENT#${tournamentId}`, `CAPTAIN_REQUEST#${other.id}`, {
+            status: "rejected",
+            updatedAt: now()
+          });
+        }
+      }
+      return ok({ updated: true, status });
+    }
+
+    // ── POST /tournaments/{tournamentId}/teams/{teamId}/assign-captain ─
+    // Organizer directly assigns a captain by email (top-down)
+    if (method === "POST" && path === "/tournaments/{tournamentId}/teams/{teamId}/assign-captain") {
+      const { tournamentId, teamId } = params;
+      const { email } = body;
+      if (!email) return err2("email is required");
+      // Store captainEmail on the team; captainId will be set when user logs in
+      // or can be updated via a future user-lookup endpoint
+      await updateItem(`TOURNAMENT#${tournamentId}`, `TEAM#${teamId}`, {
+        captainEmail: email.toLowerCase().trim(),
+        updatedAt: now()
+      });
+      return ok({ updated: true, captainEmail: email.toLowerCase().trim() });
+    }
+
+    // ── GET /users ───────────────────────────────────────────────
+    // Search users by name or email (simple DynamoDB scan with filter)
+    if (method === "GET" && path === "/users") {
+      const qs = event.queryStringParameters ?? {};
+      const q = (qs.q ?? "").toLowerCase().trim();
+      if (q.length < 2) return ok([]);
+      const limit = Math.min(parseInt(qs.limit ?? "20"), 50);
+      const res = await client.send(new import_client_dynamodb.ScanCommand({
+        TableName: TABLE,
+        FilterExpression: "begins_with(PK, :userPrefix) AND SK = :profile AND (contains(#email, :q) OR contains(#name, :q))",
+        ExpressionAttributeNames: { "#email": "email", "#name": "name" },
+        ExpressionAttributeValues: (0, import_util_dynamodb.marshall)({
+          ":userPrefix": "USER#",
+          ":profile": "PROFILE",
+          ":q": q
+        }),
+        Limit: limit * 5
+      }));
+      const users = (res.Items ?? [])
+        .map((i) => (0, import_util_dynamodb.unmarshall)(i))
+        .filter((u) => u.email?.toLowerCase().includes(q) || u.name?.toLowerCase().includes(q))
+        .slice(0, limit)
+        .map((u) => ({ sub: u.id, name: u.name, email: u.email }));
+      return ok(users);
+    }
+
     return err2("Not found", 404);
   } catch (e5) {
     console.error("Tournament Lambda error:", e5);
